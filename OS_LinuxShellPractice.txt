@@ -1,0 +1,2273 @@
+#define _CRT_SECURE_NO_WARNINGS
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <pthread.h>
+
+#define ANSI_COLOR_RED     "\x1b[1;31m"
+#define ANSI_COLOR_GREEN   "\x1b[1;32m"
+#define ANSI_COLOR_YELLOW  "\x1b[33m"
+#define ANSI_COLOR_BLUE    "\x1b[1;34m"
+#define ANSI_COLOR_MAGENTA "\x1b[35m"
+#define ANSI_COLOR_CYAN    "\x1b[36m"
+#define ANSI_COLOR_RESET   "\x1b[0m"
+#define ANSI_COLOR_GREEN_BACK    "\x1b[102m"
+
+#define MAX 300
+
+typedef struct node* nptr;
+typedef struct node {
+    nptr lchild, rsibling;
+
+    char type; //'d': 디렉토리, '-': 파일
+    int mode[3]; //접근권한
+    char owner[MAX]; //소유자
+    char group[MAX]; //그룹
+    struct tm* time; //시간
+    char name[MAX]; //파일명
+
+    char* contents[MAX]; //파일인 경우 안의 내용
+    int line; //파일 내용 줄글 수
+
+}node;
+
+typedef struct MultipleArg
+{
+    char kind;
+    int m[3];
+    char* owner;
+    char* group;
+    char name[MAX][MAX];
+}Multi;
+int sharedcounting=0;
+int status;
+pthread_mutex_t count_lock;
+pthread_mutexattr_t mutex_attr;
+//MultiArg is for thread
+
+nptr root, user, current, fnd = NULL;
+nptr current_path[MAX]; //현재경로 저장 배열
+int current_path_i; //현재 인덱스
+nptr ab_path[MAX];
+int ab_path_i;
+nptr find_path[MAX];
+int find_path_i;
+char History_of_Command[MAX][MAX];
+int Row_of_History;
+
+char* Nodedata = "Nodedata.txt"; //file input output 전역변수
+
+nptr cp_path[MAX];
+int cp_path_i;
+
+//Elementary
+nptr search_Sibling(nptr start, char* n);
+void init_ab_path();
+nptr searchAbsolute(char* path);
+void init();
+
+//command interfce 함수들
+void send_command(int i, int op_count, char op[MAX][MAX]);
+void command_interface();
+
+//Necessary command and related functions
+void cd(char* dname);
+
+void new_Node(char t, int* m, char* o, char* g, char* n);
+void new_Node_Thread(char t, int* m, char* o, char* g, char* n);
+void mk_dir(int int_op,char mod[MAX], char path[MAX]);
+void *thrfunc(void *multiple_arg);
+
+void pwd();
+
+int opORdir(char c[MAX]);
+int ls_op(char* op);
+void send_ls(int op_count, char op[][MAX]);
+void ls(int int_op, nptr look);
+void print_node(int op, nptr n);
+
+void rm(int rm_op, char *FILE_NAME);
+void freedir(nptr t);
+void rm_filename(char *FILENAME);
+void rm_directory(char *DIREC_NAME);
+
+void cat(int cat_op, char* file_name);
+void cat_NEW(char* FILE_NAME);
+void cat_R(char* FILE_NAME, int num);
+
+void print_cp(char* file,char* copy);
+void cp(char* file, char* copy_directory);
+
+void find_op(int fd_op, char *FILE_NAME, char* FILE_NAME2);
+void find(char *FILE_NAME, char* FILE_NAME2);
+void find_N_op(char *FILE_NAME);
+void cd_find(char* dname);
+void find_T(char *FILE_NAME);
+void type_find(char* FILE_NAME);
+void find_FULL(char* FILE_NAME, char* FILE_NAME2);
+void find_FULL_T(char *FILE_NAME, char* FILE_NAME2);
+void type_find_T(char *FILE_NAME2, char* FILE_NAME);
+
+nptr makeNodedata(char* d);
+void writeNodedata(nptr temp);
+void callNodedata(int op);
+
+//appendix command
+void ch_mod(char mod[MAX],char dname[MAX]);
+void ch_own(char ownergroup[MAX], char name[MAX]);
+void history();
+void exclamationexclamation();
+
+
+int main() {
+   init();
+    callNodedata(0);
+    current_path[0] = root;
+    current_path[1] = user;
+    current_path_i = 1;
+    current = user;
+
+   char command_list[][10] = { "ls","pwd","cd","mkdir","cat","cp","rm","find","history","!!","exit","chmod","chown" };
+   int list_len = sizeof(command_list) / sizeof(command_list[0]);
+   int m[3] = { 6,4,4 };
+   int j;
+
+   while (1) {
+
+      command_interface();
+      char full_command[MAX];
+      char option[MAX][MAX] = {0,};
+
+      fgets(full_command, MAX, stdin);
+      for (j = 0; full_command[j] != '\n'; j++);
+      for (j; j < MAX; j++) full_command[j] = '\0';
+      // 명령어를 받아오는 코드
+      // '\n'제거, 쓰레기값 NULL 처리
+
+      if( strcmp("!!",full_command) != 0)//for history command
+      {
+          strcpy(History_of_Command[Row_of_History++],full_command);
+      }
+      
+      char* cmd = strtok(full_command, " ");
+      int count_option = 0; // 옵션 개수
+      while (cmd != NULL) {
+         strcpy(option[++count_option], cmd);
+         cmd = strtok(NULL, " ");
+      }
+      // " "를 기준으로 명령어를 잘라 option배열에 삽입, i=1부터
+      int i = 0;
+      while (i < list_len && strcmp(option[1], command_list[i]) != 0) i++;
+      if (strcmp(option[1], command_list[i]) == 0) send_command(i, count_option, option);
+      else printf(ANSI_COLOR_RED"Error: Wrong command...\n"ANSI_COLOR_RESET);
+      // command_list[]를 이용해 명령어 탐색, 명령어 실행함수로 보냄
+   }
+   return 0;
+}
+
+/////////////////////////////////
+//Elementary function & command interface source code
+/////////////////////////////////
+nptr search_Sibling(nptr start, char* n) {
+
+   nptr temp = start->lchild;
+   while (temp != NULL && strcmp(n, temp->name) != 0) {
+      temp = temp->rsibling;
+   }
+   if (temp == NULL) {
+      return NULL;
+   }//일치노드가 없을 시 NULL 반환
+   else if (strcmp(n, temp->name) == 0) {
+      return temp;
+   }//일치 노드 반환
+
+}
+// current의 자식노드 탐색
+// 일치노드 /  NULL 반환
+
+void init_ab_path() {
+    int i = 0;
+    ab_path_i = 0;
+    while (i < MAX)ab_path[i++] = NULL;
+}
+
+nptr searchAbsolute(char* path) {
+   init_ab_path();
+   nptr temp = root;
+   int i;
+   int path_list_row = 0;
+   char absolute_path_list[MAX][MAX];
+   char str1[MAX];
+   char* token;
+   strcpy(str1, path);
+
+   if (str1[0] == '/') {
+      token = strtok(str1, "/");
+      while (token != NULL) {
+         strcpy(absolute_path_list[path_list_row++], token);
+         token = strtok(NULL, "/");
+      }
+
+
+      for (i = 0; i + 1 < path_list_row; i++) {
+         ab_path[i] = temp;
+         temp = search_Sibling(temp, absolute_path_list[i + 1]);
+      }
+      ab_path[i] = temp;
+      ab_path_i = i;
+      // ab_path에 탐색 디렉토리 경로 저장
+      if (temp == NULL)
+         return NULL;
+      else {
+         return temp;
+      }
+   }
+   for (i = 0; i < current_path_i; i++) {
+      ab_path[i] = current_path[i];
+   }
+   ab_path[i] = current;
+   ab_path_i = i;
+   if (strcmp(path, current->name)==0) {
+      return current;
+   }
+   else {
+      i++;
+      temp = search_Sibling(current, path);
+      ab_path[i] = temp;
+      ab_path_i = i;
+      return temp;
+   }
+}
+// 절대경로 처리 ('/')
+// 노드 반환 (디렉토리, 파일 둘다)
+
+void init() {
+    root = (nptr)malloc(sizeof(node));
+    root->type = 'd';
+    root->mode[0] = 7; root->mode[1] = 5; root->mode[2] = 5;
+    strcpy(root->owner , "root");
+    strcpy(root->group ,"root");
+    time_t t = time(NULL);
+    root->time = localtime(&t);
+    strcpy(root->name, "home");
+
+    user = (nptr)malloc(sizeof(node));
+    user->type = 'd';
+    user->mode[0] = 7; user->mode[1] = 5; user->mode[2] = 5;
+    strcpy(user->owner ,"User");
+    strcpy(user->group ,"User");
+    t = time(NULL);
+    user->time = localtime(&t);
+    strcpy(user->name, "User");
+
+    current_path_i = 0;
+    current_path[current_path_i++] = root;
+    current_path[current_path_i] = user;
+
+    root->lchild = user; root->rsibling = NULL;
+    user->lchild = NULL; user->rsibling = NULL;
+    current = user;
+}
+
+//command interface functions
+
+void send_command(int i, int op_count, char op[MAX][MAX]) {
+
+
+   switch (i)
+   {
+   case 0:
+      send_ls(op_count, op);
+      break;
+
+   case 1:
+      pwd();
+      break;
+
+   case 2:
+      if (op_count==1) {//there is only cd; comeback to user
+         current = user;
+         if (current_path_i > 1) {
+            for (current_path_i; current_path[current_path_i] != current; current_path_i--)
+               current_path[current_path_i] = NULL;
+         }
+         else {//ex cd /home/User/banana
+            current_path_i = 1;
+            current_path[0] = root;
+            current_path[current_path_i] = current;
+         }
+      }
+      else cd(op[2]);
+      break;
+
+    case 3:
+        if(op_count==1) printf(ANSI_COLOR_RED"%s: missing operand\n"ANSI_COLOR_RESET, op[1]);
+        else
+        {
+            if( !strcmp(op[2],"-p") ) mk_dir(1,NULL,op[3]);//ex) mkdir -p a/b/c
+            else if( !strcmp(op[2],"-m"))  mk_dir(2,op[3],op[4]);//ex) mkdir -m 700 a
+            else mk_dir(0,NULL,op[2]);//ex) mkdir a
+        }
+        break;
+
+   case 4:
+      if (!strcmp(op[2], "-n")) cat(1, op[3]);
+      else if (!strcmp(op[2], ">")) cat(2, op[3]);
+      else cat(0, op[2]);
+      break;
+
+   case 5:
+        cp(op[2],op[3]);
+        break;
+
+    case 6:
+        if (!strcmp(op[2], "-f")) rm(1, op[3]);
+        else if (!strcmp(op[2], "-r")) rm(2, op[3]);
+        else if (!strcmp(op[2], "-fr")||!strcmp(op[2], "-rf")) rm(3, op[3]);
+        else rm(0, op[2]);
+        break;
+
+    case 7:
+        if (!strcmp(op[2], "-name")) find_op(1, op[3], op[3]);
+        else if (!strcmp(op[2], "-type")) find_op(2, op[3], op[3]);
+        else if(!strcmp(op[3], "-name")) find_op(3, op[2], op[4]);
+        else if (!strcmp(op[3], "-type")) find_op(4, op[2], op[4]);
+        else find_op(0, op[2], op[3]);
+        break;
+
+    case 8:
+        history();
+        break;
+
+    case 9:
+        exclamationexclamation();
+        break;
+
+    case 10:
+   callNodedata(1);
+        exit(1);
+        break;
+
+    case 11:
+        if(op_count==1) printf(ANSI_COLOR_RED"%s: wrong operator\n"ANSI_COLOR_RESET, op[1]);
+        else if(op_count==2) printf(ANSI_COLOR_RED"%s: command missing after %s\n"ANSI_COLOR_RESET,op[1],op[2]);
+        else
+            ch_mod(op[2],op[3]);
+        break;
+
+    case 12:
+        if(op_count==1) printf(ANSI_COLOR_RED"%s: wrong operator\n"ANSI_COLOR_RESET, op[1]);
+        else if(op_count==2) printf(ANSI_COLOR_RED"%s: command missing after %s\n"ANSI_COLOR_RESET,op[1],op[2]);
+        else
+            ch_own(op[2],op[3]);
+        break;
+
+
+   default:
+      break;
+   }
+}
+// main에서 명령어, 옵션을 받아 실행함수와 연결
+
+void command_interface() {
+   printf(ANSI_COLOR_GREEN "%s@%s-VirtualBox"ANSI_COLOR_RESET ":" , user->name, user->name);
+   if (current_path_i<1) {
+      printf(ANSI_COLOR_BLUE"/%s"ANSI_COLOR_RESET, current_path[current_path_i]->name);
+   }
+   else {
+      int i=0;
+      if(current_path[i++]==root && current_path[i++]==user)printf(ANSI_COLOR_BLUE"~"ANSI_COLOR_RESET);
+      // home/user 의 경우 인터페이스에서 '~'로 나타남
+      while (i <= current_path_i) {
+         printf(ANSI_COLOR_BLUE"/%s"ANSI_COLOR_RESET, current_path[i++]->name);
+      }
+   }
+   printf(ANSI_COLOR_BLUE"$ "ANSI_COLOR_RESET);
+}
+//사용자 인터페이스
+//경로 표시
+
+
+/////////////////////////////////
+//Necessary function source code
+/////////////////////////////////
+
+//cd
+//change directory
+
+void cd(char* dname) {
+    nptr temp = root;
+    nptr cd_path[MAX];
+    nptr found_path;
+
+    int path_list_row = 0;
+    char absolute_path_list[MAX][MAX];
+
+    char str1[MAX];
+    char str2[MAX];
+    strcpy(str1, dname);
+    char* token;
+
+    token = strtok(str1, "/");
+    while (token != NULL) {
+        strcpy(absolute_path_list[path_list_row++], token);
+        token = strtok(NULL, "/");
+    }
+
+
+    if (path_list_row == 1)
+    {
+        if (strcmp(absolute_path_list[0], ".") == 0); // 현재 디렉토리 이동
+        else if (strcmp(absolute_path_list[0], "..") == 0) // 상위 디렉토리 이동
+        {
+            current_path[current_path_i--] = NULL;
+            current = current_path[current_path_i];
+        }
+        else if (strcmp(absolute_path_list[0], "home") == 0) {
+            current = root;
+            for (current_path_i; current_path[current_path_i] != current; current_path_i--)
+                current_path[current_path_i] = NULL;
+        }// /home으로 이동
+        else {
+            temp = search_Sibling(current, absolute_path_list[0]);
+            if (temp == NULL || temp->type == '-') printf(ANSI_COLOR_RED"Error: No directory '%s' exist...\n"ANSI_COLOR_RESET, dname);
+            else {
+                current = temp;
+                current_path[++current_path_i] = current;
+            }
+        }// 하위 디렉토리 검색
+    }
+    else
+    {
+        if (dname[0] == '/') {
+
+            found_path = searchAbsolute(dname);
+
+        }
+        else {
+            int i = 0;
+            while (str1[i] != '\0') {
+                str1[i] = '\0';
+            }
+            for (i = 0; i <= current_path_i; i++) {
+                strcat(str1, "/");
+                strcpy(str2, current_path[i]->name);
+                strcat(str1, str2);
+            }
+            strcat(str1, "/");
+            strcat(str1, dname);
+            found_path = searchAbsolute(str1);
+        }
+
+        if (found_path == NULL || found_path->type == '-') printf(ANSI_COLOR_RED"Error: No directory '%s' exist...\n"ANSI_COLOR_RESET, dname);
+        else {
+            current = found_path;
+            int i;
+            for (i = 0; ab_path[i] != found_path; i++) {
+                current_path[i] = ab_path[i];
+            }
+            current_path[i] = current; current_path_i = i;
+            for (++i; i < MAX; i++)
+                current_path[i] = NULL;
+        }
+
+
+    }
+    // 하위 디렉토리의 하위 디렉토리까지
+}
+
+//mkdir
+//make directory & related functions
+
+void new_Node(char t, int* m, char* o, char* g, char* n) {
+    nptr newnode, temp = NULL;
+
+    if (current == NULL) {
+        printf("Error: no current...\n");
+        return;
+    }//current가 설정되어있지 않은 경우
+    else {
+        if (current->lchild != NULL) {
+
+            temp = current->lchild;
+
+            while (temp->rsibling != NULL && strcmp(temp->rsibling->name, n) < 0) {
+
+                temp = temp->rsibling;
+
+            }//오름차순 정렬
+            if (temp != NULL && strcmp(temp->name, n) == 0 && temp->type == t) {
+                char* same;
+                if (t == 'd') same = "directory";
+                else same = "file";
+
+                printf("Error: %s '%s' already exist...\n", same, n);
+                return;
+            }//동일명, 동일형식이 존재함
+        }
+    }
+
+    newnode = (nptr)malloc(sizeof(node));
+    newnode->type = t;
+    strcpy(newnode->owner, o);
+    strcpy(newnode->group ,g);
+    strcpy(newnode->name, n);
+    for (int i = 0; i < 3; i++) {
+        newnode->mode[i] = m[i];
+        //  기본 생성값
+        //  cat 644
+        //  mkdir 755
+    }
+    time_t t_now = time(NULL);
+    newnode->time = localtime(&t_now);
+    newnode->rsibling = NULL; newnode->lchild = NULL;
+    //  newnode에 공간 할당 및 내용 저장
+
+    if (current->lchild == NULL) {
+        current->lchild = newnode;
+    }// 삽입 전 current 하위에 아무것도 없는 경우
+
+    else if (temp->rsibling == NULL && strcmp(temp->name, n) < 0) {
+        temp->rsibling = newnode;
+    }// 가장 끝에 새 노드가 달리는 경우
+    else if (temp == current->lchild&& strcmp(temp->name, n) > 0 ) {
+        current->lchild = newnode;
+        newnode->rsibling = temp;
+    }// 삽입 전 current 하위에 하나만 있던 경우
+
+    else {
+        newnode->rsibling = temp->rsibling;
+        temp->rsibling = newnode;
+    }//  중간에 삽입하는 경우 (삽입정렬)
+}
+
+void new_Node_Thread(char t, int* m, char* o, char* g, char* n) {
+        nptr newnode, temp = NULL;
+
+    if (current == NULL) {
+        printf("Error: no current...\n");
+        return;
+    }
+    else {
+        if (current->lchild != NULL) {
+
+            temp = current->lchild;
+
+            while (temp->rsibling != NULL && strcmp(temp->rsibling->name, n) < 0) {
+
+                temp = temp->rsibling;
+
+            }
+            if (temp != NULL && strcmp(temp->name, n) == 0 && temp->type == t) {
+                char* same;
+                if (t == 'd') same = "directory";
+                else same = "file";
+                return;
+            }
+        }
+    }
+
+    newnode = (nptr)malloc(sizeof(node));
+    newnode->type = t;
+    strcpy(newnode->owner, o);
+    strcpy(newnode->group ,g);
+    strcpy(newnode->name, n);
+    for (int i = 0; i < 3; i++) {
+        newnode->mode[i] = m[i];
+    }
+    time_t t_now = time(NULL);
+    newnode->time = localtime(&t_now);
+    newnode->rsibling = NULL; newnode->lchild = NULL;
+
+    if (current->lchild == NULL) {
+        current->lchild = newnode;
+    }
+
+    else if (temp->rsibling == NULL && strcmp(temp->name, n) < 0) {
+        temp->rsibling = newnode;
+    }
+    else if (temp == current->lchild&& strcmp(temp->name, n) > 0 ) {
+        current->lchild = newnode;
+        newnode->rsibling = temp;
+    }
+
+    else {
+        newnode->rsibling = temp->rsibling;
+        temp->rsibling = newnode;
+    }
+
+}
+
+void mk_dir(int int_op,char mod[MAX], char path[MAX]) {
+
+   sharedcounting=0;
+
+
+   Multi *multiple_arg=(Multi *)malloc(sizeof(Multi));
+   multiple_arg->kind='d';
+   multiple_arg->m[0]=7;multiple_arg->m[1]=5;multiple_arg->m[2]=5;
+   multiple_arg->owner="User";multiple_arg->group="User";// multipe_arg->name; goto below while
+
+   int path_list_row = 0;
+   char absolute_path_list[MAX][MAX];
+
+   char str1[MAX];
+   strcpy(str1, path);
+   char* token;
+
+   token = strtok(str1, "/");
+   while (token != NULL) {
+      strcpy(absolute_path_list[path_list_row], token);
+      strcpy(multiple_arg->name[path_list_row],token);
+      path_list_row++;
+      token = strtok(NULL, "/");
+   }
+
+   pthread_t tid[path_list_row];
+
+   pthread_mutex_init(&count_lock, &mutex_attr);
+
+   if(int_op==0)
+    {
+        if(path_list_row==1)
+        {
+            int m[]={7,5,5};
+            new_Node('d',m,"User","User",absolute_path_list[0]);
+            callNodedata(1);
+        }
+        else
+        {
+            printf(ANSI_COLOR_RED"mkdir: %s wrong directory\n"ANSI_COLOR_RESET, path);
+        }
+
+   }
+   else if(int_op==1 &&path_list_row>=2) {
+   if(1)
+{
+      int i=0;
+      for (i=0; i<path_list_row; i++)
+      {
+         if( (status=pthread_create(&tid[i], NULL,&thrfunc, (void *)multiple_arg))!=0)
+        {
+            printf(ANSI_COLOR_RED"pthread_create fail : %s\n"ANSI_COLOR_RESET, strerror(status));
+            exit(0);
+         }
+        //thread function starting point
+      }
+      for (i=0;i<path_list_row;i++)
+        {
+            pthread_join(tid[i],NULL);//information where thrfunc skewed
+        }
+
+
+
+      for (i=0;i<path_list_row;i++)
+        {
+            time_t t_now = time(NULL);
+            current->time = localtime(&t_now);// re-configure time
+
+            cd("..");
+      }
+        pthread_mutex_destroy(&count_lock);
+}
+   callNodedata(1);
+
+   }
+   else if(int_op==2)
+    {
+        int i=0;
+        int m[3];
+        for(i=0;i<3;i++)
+        {
+            m[i]=(int)(mod[i]-'0');
+        }
+        new_Node('d', m, "User","User",absolute_path_list[0]);
+   callNodedata(1);
+    }
+}
+
+void *thrfunc(void *multiple_arg){
+    Multi *my_multiple_arg=(Multi *)multiple_arg;
+    pthread_mutex_lock(&count_lock);
+    //printf("\n[%ld thread] mutex lock \n", pthread_self);
+
+    new_Node_Thread(my_multiple_arg->kind
+             ,my_multiple_arg->m
+             ,my_multiple_arg->owner
+             ,my_multiple_arg->group
+             ,my_multiple_arg->name[sharedcounting]);
+
+    cd(my_multiple_arg->name[sharedcounting]);
+    sharedcounting++;
+    sleep(0.01);
+
+    //printf("[%ld thread] mutex unlock \n", pthread_self());
+    pthread_mutex_unlock(&count_lock);
+    sleep(0.01);
+}
+
+//pwd
+//print working directory
+
+void pwd() {
+   int i = 0;
+   if (current_path[i] == root) { printf("/home"); }
+   while (current_path[i++] != current) {
+      printf("/%s", current_path[i]->name);
+   }
+   printf("\n");
+}
+
+//ls
+//list & related functions
+
+int opORdir(char c[MAX]) {
+   if (c[0] == '/') return 1;//디렉토리
+   else if (c[0] == '-') return -1; //옵션
+   else return 0;
+}
+
+int ls_op(char* op) {
+
+   if (strcmp(op, "") == 0)return 0;
+   else if (strcmp(op, "-a") == 0)return 1;
+   else if (strcmp(op, "-l") == 0)return 2;
+   else if (strcmp(op, "-la") * strcmp(op, "-al") == 0)return 3;
+   else return -1;
+}
+//ls 옵션 정수형으로 반환
+
+void send_ls(int op_count, char op[][MAX]) {
+   nptr temp = NULL;
+   int check_op[5];
+   char direc[5][MAX];
+   int di = 0;
+   int option=-1;
+
+   for (int i = 0; i < op_count-1 ; i++) {
+      check_op[i] = opORdir(op[i + 2]);
+   }
+   switch (op_count) {
+   case 1: // default
+      ls(0, current);
+      break;
+
+   case 2: // 옵션 1개
+      if (check_op[0] < 0) {
+         temp = searchAbsolute(current->name);
+         ls(ls_op(op[2]), current);
+      }
+      else if (check_op[0] > 0) {
+         temp = searchAbsolute(op[2]);
+         if (temp == NULL) printf(ANSI_COLOR_RED"Error: No file or directory name '%s'...\n"ANSI_COLOR_RESET, op[2]);
+         else ls(0, temp);
+      }
+      else {
+         temp = searchAbsolute(op[2]);
+         if (temp == NULL) printf(ANSI_COLOR_RED"Error: No file or directory name '%s'...\n"ANSI_COLOR_RESET, op[2]);
+         else ls(0, temp);
+      }
+      break;
+
+   case 3: //옵션 2개
+      for (int i = 0; i < op_count - 1; i++) {
+         if (check_op[i] >= 0) {
+            strcpy(direc[di++], op[i + 2]);
+         }
+         else {
+          if(option<0)option = ls_op(op[i + 2]); // 처음 옵션 받을 때
+          else if(ls_op(op[i+2])>2) option = 3; // 두번째 옵션이 -al
+          else{ //-a-a, -a-l,
+           if(option != ls_op(op[i+2])) option = 3;
+          }
+       }
+      }
+     for(int i = 0; i<di;i++){
+        temp = searchAbsolute(direc[i]);
+        if (temp == NULL) printf(ANSI_COLOR_RED "Error: No file or directory name '%s'...\n"ANSI_COLOR_RESET, op[2]);
+          else {
+              if(di>1) printf(ANSI_COLOR_CYAN"%s:\n"ANSI_COLOR_RESET, direc[i]);
+                  ls(option, temp);
+              temp = NULL;
+               }
+     }
+      
+      break;
+
+   default:
+      if (op_count > 5) { printf(ANSI_COLOR_RED "Error: Too many variable...\n"ANSI_COLOR_RESET); break; }
+
+      for (int i = 0; i < op_count - 1; i++) {
+         if (check_op[i] >= 0) {
+            strcpy(direc[di++], op[i + 2]);
+         }
+         else {
+            if (option<0 || ls_op(op[i + 2])>option)
+               option = ls_op(op[i + 2]);
+         }
+      }
+      for (int i = 0; i < di; i++) {
+
+         temp = searchAbsolute(direc[i]);
+         if (temp == NULL) printf(ANSI_COLOR_RED "Error: No file or directory name '%s'...\n"ANSI_COLOR_RESET, op[i+2]);
+         else {
+            printf(ANSI_COLOR_CYAN"%s:\n"ANSI_COLOR_RESET, direc[i]);
+            ls(option, temp);
+            temp = NULL;
+         }
+
+      }
+      break;
+   }
+}
+
+
+void print_node(int op, nptr n) {
+   switch (op)
+   {
+
+   case 0:
+   case 1:
+
+     { if(n->type == 'd')
+   printf(ANSI_COLOR_GREEN_BACK"%s"ANSI_COLOR_RESET"      ", n->name);
+      else if(n->type == '-')
+   printf(ANSI_COLOR_GREEN"%s"ANSI_COLOR_RESET"      ", n->name);
+      else
+   printf("%s""      ",n->name);}
+      break;
+
+   case 2:
+   case 3:
+      printf("%c", n->type);
+      int i; char n_mode[4];
+      for (i = 0; i < 3; i++) {
+         if (n->mode[i] == 0) strcpy(n_mode, "---");
+         else if (n->mode[i] == 1) strcpy(n_mode, "--x");
+         else if (n->mode[i] == 2) strcpy(n_mode, "-w-");
+         else if (n->mode[i] == 3) strcpy(n_mode, "-wx");
+         else if (n->mode[i] == 4) strcpy(n_mode, "r--");
+         else if (n->mode[i] == 5) strcpy(n_mode, "r-x");
+         else if (n->mode[i] == 6) strcpy(n_mode, "rw-");
+         else strcpy(n_mode, "rwx");
+         printf("%s", n_mode);
+      }
+      printf("   %s   %s   ", n->owner, n->group);
+      char charM[4];
+      int m = n->time->tm_mon;
+      m+=1;
+      if (m == 1) strcpy(charM, "JAN");
+      else if (m == 2)strcpy(charM, "FEB");
+      else if (m == 3) strcpy(charM, "MAR");
+      else if (m == 4) strcpy(charM, "APR");
+      else if (m == 5)strcpy(charM, "MAY");
+      else if (m == 6) strcpy(charM, "JUN");
+      else if (m == 7) strcpy(charM, "JUL");
+      else if (m == 8) strcpy(charM, "AUG");
+      else if (m == 9) strcpy(charM, "SEP");
+      else if (m == 10) strcpy(charM, "OCT");
+      else if (m == 11) strcpy(charM, "NOV");
+      else strcpy(charM, "DEC");
+      printf("%s   %d   %d:%d   ",charM, n->time->tm_mday, n->time->tm_hour, n->time->tm_min);
+
+      if (n == ab_path[ab_path_i]) printf(ANSI_COLOR_BLUE"."ANSI_COLOR_RESET);
+      else if (n == ab_path[ab_path_i - 1])printf(ANSI_COLOR_BLUE".."ANSI_COLOR_RESET);
+      else{
+   if(n->type == 'd')
+   printf(ANSI_COLOR_GREEN_BACK"%s"ANSI_COLOR_RESET, n->name);
+   else if(n->type == '-')
+   printf(ANSI_COLOR_GREEN"%s"ANSI_COLOR_RESET, n->name);
+   else
+   printf("%s",n->name);}
+      printf("\n");
+      break;
+
+   default:
+
+      break;
+   }
+}
+//한개 노드 출력
+
+void ls(int int_op, nptr look) {
+
+   nptr temp = look->lchild;
+
+   int i = 0;
+
+   switch (int_op)
+   {
+   case 0: //옵션 없음
+      while (temp != NULL && temp->name[0] != '.') {
+         print_node(int_op, temp);
+         temp = temp->rsibling;
+         i++;
+         if (i > 4) {
+            i = 0;
+            printf("\n");
+         }//인터페이스.. 한 줄에 5개씩
+      }
+      printf("\n");
+      break;
+
+   case 1: //a: 숨김파일
+      printf(ANSI_COLOR_BLUE".      ..      "ANSI_COLOR_RESET);
+      i = 1;
+      while (temp != NULL) {
+         print_node(int_op, temp);
+         temp = temp->rsibling;
+         i++;
+         if (i > 3) {
+            i = 0;
+            printf("\n");
+         }//인터페이스.. 한 줄에 5개씩
+      }
+      printf("\n");
+      break;
+   case 2: //l: 긴 정보
+      while (temp != NULL && temp->name[0] != '.') {
+         print_node(int_op, temp);
+         temp = temp->rsibling;
+      }
+      break;
+   case 3: //al: 숨김파일, 긴정보
+      print_node(int_op, look);
+      if(ab_path_i>0) print_node(int_op, ab_path[ab_path_i - 1]);
+      while (temp != NULL) {
+         print_node(int_op, temp);
+         temp = temp->rsibling;
+      }
+      break;
+
+   default:
+      printf(ANSI_COLOR_RED"Error: Wrong Option...\n"ANSI_COLOR_RESET);
+      break;
+   }
+}
+
+//rm
+//remove & related functions
+
+void rm(int rm_op, char * FILE_NAME)
+{
+    switch (rm_op)
+    {
+    case 0:
+        rm_filename(FILE_NAME);
+        break;
+    case 1:
+        rm_directory(FILE_NAME);
+        break;
+    case 2:
+        rm_directory(FILE_NAME);
+        break;
+    case 3:
+        rm_directory(FILE_NAME);
+        break;
+
+    }
+}
+
+
+void rm_filename(char *FILE_NAME)
+{
+   nptr delnode = NULL;
+   nptr head = NULL;
+   nptr tail = NULL;
+   int dot = 0;
+   char yes;
+
+   head = tail = current->lchild;
+   if(!strcmp(head->name,FILE_NAME))
+    {
+        if(head->type!='d'){
+        current->lchild = head->rsibling;
+        delnode = head;}
+        else{ dot = 1;
+            printf("[FAIL] \'%s\' is not a FILE \n",head->name);}
+    }
+    else
+    {
+        head = head->rsibling;
+        while(head != NULL)
+        {
+            if(!strcmp(head->name, FILE_NAME))
+            {
+                delnode = head;
+                break;
+            }
+            else
+            {
+                tail = head;
+                head = head->rsibling;
+            }
+        }
+    }
+    if(delnode != NULL)
+    {
+        //ptr = strstr(delnode->mode,"-");
+        if(delnode->type!='-'){
+            printf("[FAIL] \'%s\' is not a FILE \n",FILE_NAME);}
+        else
+        {
+            //printf("%d",delnode->mode[0]);
+            if(delnode->mode[0] == 7 || delnode->mode[0] == 6 || delnode->mode[0] == 2 || delnode->mode[0] == 3)
+                {
+                    tail->rsibling = delnode->rsibling;
+                    free(delnode);
+                    printf("[SUCCESS] \'%s\' is removed \n",FILE_NAME);
+                }
+            else{
+                        printf("rm: remove write-proteccted regular file '%s'? enter [y] or [n] : ",FILE_NAME);
+                        scanf("%c",&yes);
+                        if(yes == 'y'){
+                            delnode->mode[0] = 7;
+                            rm_filename(FILE_NAME);
+
+                            getchar();
+                            }
+                        else
+                        {
+                           getchar();
+                        }
+                    }
+        }
+
+    }
+    else
+    {   if(dot==0)
+        printf("[FAIL] \'%s\' is not exist. \n",FILE_NAME);
+    }
+callNodedata(1);
+}
+
+
+void freedir(nptr t)               // rm_directory 부분에 쓰일 함수이다. 재귀호출로 , 자시노드와 sibiling 노드를 삭제한다.
+{
+   if (t != NULL)
+   {
+      freedir(t->lchild);
+      free(t);
+   }
+}
+
+
+void rm_directory(char *DIREC_NAME)  // 디렉토리를 삭제하는 노드이다.
+{
+   nptr delnode = NULL;   // delnode ----> 삭제하게될 대상...
+   nptr head = NULL;      // lead ----> 탐색에 이용...
+   nptr tail = NULL;      // trail -----> lead이전의 노드...
+
+   head = tail = current->lchild;
+
+    if(!strcmp(head->name,DIREC_NAME))
+        {
+            current ->lchild = head->rsibling;   // current_node의 lchild 가 삭제할 대상일 경우.....
+            delnode = head;
+        }
+    else
+   {
+      head = head->rsibling;   // current->lchild->rsibiling으로 연결....
+      while (head != NULL)
+      {
+         if(!strcmp(head->name, DIREC_NAME))
+         {
+            delnode = head;
+            break;
+         }
+         else
+         {
+            tail = head;
+            head = head->rsibling;
+         }
+
+      }
+   }
+   if(delnode !=NULL)
+   {
+       nptr delnodeptr = delnode->lchild;
+
+            tail->rsibling = delnode->rsibling;
+
+
+                freedir(delnode->lchild);
+            free(delnode);
+            printf("[SUCCESS] \'%s\' is removed. \n", DIREC_NAME);
+   }
+   else
+   {
+      printf("[FAIL]  %s is not exist. \n",DIREC_NAME);
+   }
+callNodedata(1);
+}
+
+//cat
+//cat & related functions
+
+void cat_R(char* FILE_NAME, int num)
+{
+   char str[MAX];
+   int i = 0;
+   nptr lead = search_Sibling(current, FILE_NAME);
+   if (lead != NULL) {
+
+      FILE* fp = fopen(lead->name, "r");
+      if (fp == NULL)
+      {
+         printf(ANSI_COLOR_RED"Error: Cannot read file \"%s\"...\n"ANSI_COLOR_RESET,lead->name);
+         return;
+      }
+      while (!feof(fp))
+      {
+         //fgets(str,MAX,fp);
+         if (fgets(str, MAX, fp) == NULL) break;
+         if (num == 1)printf("%d  ",++i);
+         printf("%s", str);
+      }
+      fclose(fp);
+   }
+   else {
+      printf(ANSI_COLOR_RED"Error: No file \"%s\" in this directory...\n"ANSI_COLOR_RESET, FILE_NAME);
+   }
+
+}
+
+void cat_NEW(char* FILE_NAME)
+{
+   int cat_mode[3] = { 6,4,4 };
+   new_Node('-', cat_mode, "User", "User", FILE_NAME);
+   callNodedata(1);
+
+   char ch;
+
+   while ((ch = getchar()) != EOF)
+   {
+      FILE* fp = fopen(FILE_NAME, "a");
+      fprintf(fp, "%c", ch);
+      fclose(fp);
+   }
+
+   printf("\n");
+
+}
+
+void cat(int cat_op, char* file_name) {
+   switch (cat_op)
+   {
+   case 0:
+      cat_R(file_name,0);
+      break;
+   case 1:
+      cat_R(file_name,1);
+      break;
+   case 2:
+      cat_NEW(file_name);
+      break;
+
+   default:
+      break;
+   }
+}
+
+//cp
+//copy & related functions
+
+
+void print_cp(char* file,char* copy)
+{
+    int count;
+    char buffer[5] = {0};
+    FILE *fp = fopen(file, "r");
+    FILE *wp = fopen(copy, "w");
+    while (feof(fp) == 0){
+        count = fread(buffer, sizeof(char),4,fp);
+        fwrite(buffer, sizeof(char),count,wp);
+        memset(buffer, 0, 5);
+    }
+    fclose(wp);
+    fclose(fp);
+}
+
+void cp(char* file, char* copy_directory)
+{
+    nptr temp = root;
+    int i;
+    nptr temp1;
+    nptr afile = searchAbsolute(file);//복사하려는 파일
+    nptr cp_f[MAX];
+    int m[3]={6,4,4};
+    for(i=0;i<=ab_path_i;i++)
+        cp_f[i] = ab_path[i];
+    int cp_f_i = i-1;
+
+    nptr cp_to = searchAbsolute(copy_directory);
+    nptr cptr = search_Sibling(cp_f[cp_f_i-1],cp_f[cp_f_i]->name);
+    //복사하려는 파일이 있는 디렉토리를 시작으로 복사하려는 파일 찾음
+    if(strstr(file,"/")){
+
+        if(cp_to!=NULL)//다른 디렉토리에 복사
+        {
+            current = cp_to;
+            new_Node('-',m,"User","User",cptr->name);
+        }
+        else //다른 디렉토리에 다른이름으로 복사
+        {
+            char otherfile[MAX];
+            int len = strlen(copy_directory);
+            int i = 1;
+            char *token;
+            strcpy(otherfile,copy_directory);
+            token = strtok(otherfile, "/");
+            while (token != NULL) {
+                strcpy(otherfile,token);
+                token = strtok(NULL, "/");
+            }
+            print_cp(cp_f[cp_f_i]->name,otherfile);
+            current = ab_path[ab_path_i-1];
+            new_Node('-',m,"User","User",otherfile);
+        }
+        current = current_path[current_path_i];
+    }
+    else{
+        nptr temp;
+        nptr cptr = search_Sibling(current, file);
+        temp = cptr -> rsibling;
+        if(cptr==NULL)
+            printf("there is no file");
+        else{
+            while(temp!=NULL)
+                temp = temp -> rsibling;
+            if(temp==NULL){
+                int m[3]={6,4,4};
+                print_cp(file, copy_directory);
+                new_Node('-',m,"User","User",copy_directory);
+            }
+        }
+    }
+    callNodedata(1);
+}
+
+//find
+//find & related
+
+void find_op(int fd_op, char* FILE_NAME, char* FILE_NAME2)
+{
+
+    switch(fd_op)
+    {
+    case 0:
+        find(FILE_NAME, FILE_NAME2);
+        break;
+    case 1:
+        find_N_op(FILE_NAME);
+        break;
+    case 2:
+        find_T(FILE_NAME);
+        break;
+    case 3:
+        find_FULL(FILE_NAME, FILE_NAME2);
+        break;
+    case 4:
+        find_FULL_T(FILE_NAME, FILE_NAME2);
+    }
+
+
+}
+
+void cd_find(char* dname) {
+   nptr temp = root;
+   nptr cd_path[MAX];
+   nptr found_path;
+   find_path_i = 0;
+
+   int path_list_row = 0;
+   char absolute_path_list[MAX][MAX];
+
+   char str1[MAX];
+   strcpy(str1, dname);
+   char* token;
+
+   token = strtok(str1, "/");
+   while (token != NULL) {
+      strcpy(absolute_path_list[path_list_row++], token);
+      token = strtok(NULL, "/");
+   }
+
+   if (path_list_row == 1)
+   {
+       if (strcmp(absolute_path_list[0], ".") == 0); // 현재 디렉토리 이동
+      else if (strcmp(absolute_path_list[0], "..") == 0) // 상위 디렉토리 이동
+      {
+         find_path[find_path_i--] = NULL;
+         fnd = find_path[find_path_i];
+      }
+      else if (strcmp(absolute_path_list[0], "home") == 0) {
+         fnd = root;
+      }// /home으로 이동
+      else {
+         temp = search_Sibling(current, absolute_path_list[0]);
+         if (temp == NULL || temp->type == '-') {
+                printf(ANSI_COLOR_RED"Error: No directory '%s' exist...\n"ANSI_COLOR_RESET, dname);
+                fnd = NULL;}
+
+         else {
+           fnd = temp;
+            find_path[++find_path_i] = fnd;
+         }
+      }
+    }// 하위 디렉토리 검색
+
+   else
+   {
+      found_path = searchAbsolute(dname);
+      if (found_path == NULL || found_path->type == '-')  {
+                printf(ANSI_COLOR_RED"Error: No directory '%s' exist...\n"ANSI_COLOR_RESET, dname);
+                fnd = NULL;}
+      else {
+         fnd = found_path;
+         int i;
+         for (i = 0; ab_path[i] != found_path; i++) {
+            find_path[i] = ab_path[i];
+         }
+         find_path[i] = fnd; find_path_i = i;
+      }
+   }
+}
+
+void find(char *FILE_NAME, char *trash)
+{
+    char del[] = "/";
+    char* com;
+    int i = 0;
+    int p = 0;
+    int yo = MAX;
+    nptr found_path[MAX];
+    int found_path_i = 0;
+    char str[MAX];
+    char* str_f;
+    strcpy(str,FILE_NAME);
+
+    if(strlen(trash)==0){
+    nptr head;
+    if(!strstr(FILE_NAME,"/")) // 그냥 검색할 떄 -> strstr은 찾는 값이 없으면 -1 값을 반환, 있으면 1
+    {
+        if(search_Sibling(current,FILE_NAME)!=NULL)
+        {
+            find_path[p] = current; p++;
+            head = find_path[p] = current->lchild;
+            while(strcmp(head->name,FILE_NAME)!=0)
+            {
+                head = find_path[p] = find_path[p]->rsibling;
+            }
+
+            while(!strcmp(find_path[1]->name,FILE_NAME))
+            {
+                while(head != NULL)
+                {
+                    printf("%s",find_path[1]->name);
+                    for(i=2;i<=p;i++)
+                        printf("/%s",find_path[i]->name);
+                    printf("\n");
+                    head = find_path[p+1] = find_path[p]->lchild;
+                    p++;
+                }
+                p--;
+                if(find_path[p]->rsibling != NULL)
+                head = find_path[p] = find_path[p]->rsibling;
+                else
+                {
+                    p--;
+                    head = find_path[p] = find_path[p]->rsibling;
+                }
+            }
+        }
+        else printf(ANSI_COLOR_RED"find:  \'%s\'  : No such file or directory\n"ANSI_COLOR_RESET,FILE_NAME);
+    }
+    else
+    {
+        cd_find(FILE_NAME);
+        if(str[0]=='/'&&fnd!=NULL)
+        {
+            find_path[p] = root; p++;
+            if(!strcmp(fnd->name,"home")) // 모든 트리를 검사할떄
+            {
+            printf("/%s\n",fnd->name);
+            head = find_path[p] = root->lchild;
+            while(head != root){
+                while(head != NULL)
+                {
+                    if(head != NULL)
+                    {
+                        printf("/%s",find_path[0]->name);
+                        for(i=1; i<=p; i++)
+                        {
+                            printf("/%s",find_path[i]->name);
+                        }
+                        printf("\n");
+                        p++;
+                        head = find_path[p] = head->lchild;
+                    }
+                    else{
+                    p++;
+                    head  = find_path[p]  = head->lchild;}
+
+                }
+                p--;
+                if(find_path[p]==user)
+                    break;
+                head = find_path[p] = find_path[p]->rsibling;
+                }
+            }
+            else
+            {
+                p = 0;
+                found_path[p] = fnd;
+                p++;
+                head = found_path[p] = fnd->lchild;
+                if(head == NULL)
+                {   while(i<find_path_i){
+
+                    for(i=0; i<=find_path_i;i++)
+                    {
+                        printf("/%s",find_path[i]->name);
+                    }
+                    printf("\n");
+                    }
+                }
+                else{
+                        while(i<find_path_i){
+
+                    for(i=0; i<=find_path_i;i++)
+                    {
+                        printf("/%s",find_path[i]->name);
+                    }
+                    printf("\n");
+                    }
+                while(head != fnd){
+                    while(head != NULL)
+                    {
+                        if(head != NULL)
+                        {
+                            for(i=0; i<=find_path_i; i++)
+                            {
+                                printf("/%s",find_path[i]->name);
+                            }
+                            for(i=1; i<=p; i++)
+                            printf("/%s",found_path[i]->name);
+                            printf("\n");
+                            p++;
+                            head = found_path[p] = head->lchild;
+                        }
+                        else{
+                        p++;
+                        head  = found_path[p]  = head->lchild;}
+
+                    }
+                    p--;
+                    if(found_path[p]==fnd)
+                        break;
+                    else{
+                    head = found_path[p] = found_path[p]->rsibling;}
+                    }
+                }
+
+            }
+
+        }if(fnd==NULL)
+        printf(ANSI_COLOR_RED"find: 123\'%s\'  : No such file or directory\n"ANSI_COLOR_RESET,FILE_NAME);
+
+    }
+
+    }else {printf(ANSI_COLOR_RED"Enter the right commands with options \n"ANSI_COLOR_RESET); trash = NULL;}
+
+}
+
+
+
+void find_N_op(char *FILE_NAME)
+{
+    char str[MAX];
+    char str2[MAX];
+    char str1[MAX];
+    char* str_f;
+    char ptr[MAX];
+    char* ptr_f;
+    char del[] = "*";
+    nptr head;
+
+    int p = 0;
+    int i = 0;
+    int k = 0;
+    int io = 0;
+    int po = 0;
+    int ko = 0;
+
+    strcpy(str,FILE_NAME);
+
+    if(str[0]=='"'&&str[strlen(str)-1]=='"')
+    {
+        if(str[1]=='*'&&str[strlen(str)-2]=='*') //-name "*name*" command ##among name
+        {
+            for(i=2; i<strlen(str)-2;i++)
+            {
+                str[i-2] = str[i];
+                str[i]='*';
+            }
+            str_f = strtok(str,del);
+            //printf("%s\n",str_f);
+            //printf("%s\n",current->name);
+            find_path[p] = current; p++;
+            head = find_path[p] = current->lchild;
+            while(head != current){
+            while(head != NULL)
+            {
+                if(strstr(head->name,str_f)!=NULL)
+                {
+                    k=1;
+                    printf(".");
+                    for(i=1; i<=p; i++)
+                    {
+                        printf("/%s",find_path[i]->name);
+                    }
+                    printf("\n");
+                    p++;
+                    head = find_path[p] = find_path[p-1]->lchild;
+                }
+                else{
+                p++;
+                head  = find_path[p]  = find_path[p-1]->lchild;}
+
+            }
+            p--;
+            if(find_path[p]==current)
+                break;
+            head = find_path[p] = find_path[p]->rsibling;
+            }
+            if(k==0)
+            printf(ANSI_COLOR_RED"find:  \'%s\'  : No such file or directory\n"ANSI_COLOR_RESET,str_f);
+        }
+
+        else if(str[1]=='*')  // -name "*name" command  ##end name
+        {
+            strcpy(str1, FILE_NAME);
+            str_f = strtok(str1, " \" *");
+
+            p = 0;
+            find_path[p] = current; p++;
+            head = find_path[p] = current->lchild;
+
+            while(head != current){
+            while(head != NULL)
+            {
+                io = strlen(head->name);
+                po = strlen(str_f);
+                ko = io-po;
+                if(strncmp(head->name+ko,str_f,po)==0)
+                {
+                    k=1;
+                    printf(".");
+                    for(i=1; i<=p; i++)
+                    {
+                        printf("/%s",find_path[i]->name);
+                    }
+                    printf("\n");
+                    p++;
+                    head = find_path[p] = find_path[p-1]->lchild;
+                }
+                else{
+                p++;
+                head  = find_path[p]  = find_path[p-1]->lchild;}
+
+            }
+            p--;
+            if(find_path[p]==current)
+                break;
+            head = find_path[p] = find_path[p]->rsibling;
+            }
+            if(k==0)
+            printf(ANSI_COLOR_RED"find:  \'%s\'  : No such file or directory\n"ANSI_COLOR_RESET,str_f);
+        }
+        else if(str[strlen(str)-2]=='*')  // -name "name*" command  ##start name
+        {
+            strcpy(str1, FILE_NAME);
+            str_f = strtok(str1, " \" *");
+
+            p = 0;
+            find_path[p] = current; p++;
+            head = find_path[p] = current->lchild;
+
+            while(head != current){
+            while(head != NULL)
+            {
+                io = strlen(head->name);
+                po = strlen(str_f);
+                ko = io-po;
+                if(strncmp(head->name,str_f,po)==0)
+                {
+                    k=1;
+                    printf(".");
+                    for(i=1; i<=p; i++)
+                    {
+                        printf("/%s",find_path[i]->name);
+                    }
+                    printf("\n");
+                    p++;
+                    head = find_path[p] = find_path[p-1]->lchild;
+                }
+                else{
+                p++;
+                head  = find_path[p]  = find_path[p-1]->lchild;}
+
+            }
+            p--;
+            if(find_path[p]==current)
+                break;
+            head = find_path[p] = find_path[p]->rsibling;
+            }
+            if(k==0)
+            printf(ANSI_COLOR_RED"find:  \'%s\'  : No such file or directory\n"ANSI_COLOR_RESET,str_f);
+        }
+        else
+            {
+            strcpy(str1, FILE_NAME);
+            str_f = strtok(str1, " \" *");
+
+            p = 0;
+            find_path[p] = current; p++;
+            head = find_path[p] = current->lchild;
+
+            while(head != current){
+            while(head != NULL)
+            {
+                io = strlen(head->name);
+                po = strlen(str_f);
+                ko = io-po;
+                if(strncmp(head->name,str_f,io)==0)
+                {
+                    k=1;
+                    printf(".");
+                    for(i=1; i<=p; i++)
+                    {
+                        printf("/%s",find_path[i]->name);
+                    }
+                    printf("\n");
+                    p++;
+                    head = find_path[p] = find_path[p-1]->lchild;
+                }
+                else{
+                p++;
+                head  = find_path[p]  = find_path[p-1]->lchild;}
+
+            }
+            p--;
+            if(find_path[p]==current)
+                break;
+            head = find_path[p] = find_path[p]->rsibling;
+            }
+            if(k==0)
+            printf(ANSI_COLOR_RED"find:  \'%s\'  : No such file or directory\n"ANSI_COLOR_RESET,str_f);
+        }
+    }
+    else
+        printf(ANSI_COLOR_RED"Enter the right option\n"ANSI_COLOR_RESET);
+
+}
+
+
+
+
+
+void find_T(char *FILE_NAME)
+{
+
+    if(!strcmp(FILE_NAME,"b"))
+    {
+        type_find(FILE_NAME);
+    }
+    else if(!strcmp(FILE_NAME,"c"))
+    {
+        type_find(FILE_NAME);
+    }
+    else if(!strcmp(FILE_NAME,"d"))
+    {
+        type_find(FILE_NAME);
+    }
+    else if(!strcmp(FILE_NAME,"f"))
+    {
+        type_find(FILE_NAME);
+    }
+    else if(!strcmp(FILE_NAME,"s"))
+    {
+        type_find(FILE_NAME);
+    }
+    else if(!strcmp(FILE_NAME,"l"))
+    {
+        type_find(FILE_NAME);
+    }
+    else if(!strcmp(FILE_NAME,"p"))
+    {
+        type_find(FILE_NAME);
+    }
+    else
+        printf(ANSI_COLOR_RED"Enter the right option\n"ANSI_COLOR_RESET);
+
+}
+
+void find_FULL_T(char *FILE_NAME2, char *FILE_NAME)
+{
+    if(!strcmp(FILE_NAME,"b"))
+    {
+        type_find_T(FILE_NAME2, FILE_NAME);
+    }
+    else if(!strcmp(FILE_NAME,"c"))
+    {
+        type_find_T(FILE_NAME2, FILE_NAME);
+    }
+    else if(!strcmp(FILE_NAME,"d"))
+    {
+        type_find_T(FILE_NAME2, FILE_NAME);
+    }
+    else if(!strcmp(FILE_NAME,"f"))
+    {
+        type_find_T(FILE_NAME2, FILE_NAME);
+    }
+    else if(!strcmp(FILE_NAME,"s"))
+    {
+        type_find_T(FILE_NAME2, FILE_NAME);
+    }
+    else if(!strcmp(FILE_NAME,"l"))
+    {
+        type_find_T(FILE_NAME2, FILE_NAME);
+    }
+    else if(!strcmp(FILE_NAME,"p"))
+    {
+        type_find_T(FILE_NAME2, FILE_NAME);
+    }
+    else
+        printf(ANSI_COLOR_RED"Enter the right option\n"ANSI_COLOR_RESET);
+
+}
+
+void type_find_T(char *FILE_NAME2, char* FILE_NAME)
+{
+    cd_find(FILE_NAME2);
+    int i,p;
+    int k=0;
+    char str[MAX];
+    nptr head;
+    strcpy(str,FILE_NAME);
+    if(str[0]=='f')
+        str[0]='-';
+    p = 0;
+
+
+    if(!strstr(FILE_NAME2,".")){
+        find_path_i++;
+        head = find_path[find_path_i] = fnd->lchild;
+
+         while(head != fnd){
+            while(head != NULL)
+            {
+                if(head->type==str[0])
+                {
+                    /*for(i=0;i<find_path_i;i++)
+                    printf("/%s",find_path[i]->name);
+                    printf("\n");*/
+                    k=1;
+                    for(i=0; i<=find_path_i; i++)
+                    {
+                        printf("/%s",find_path[i]->name);
+                    }
+                    printf("\n");
+                    find_path_i++;
+                    head = find_path[find_path_i] = find_path[find_path_i-1]->lchild;
+                }
+                else{
+                find_path_i++;
+                head  = find_path[find_path_i]  = find_path[find_path_i-1]->lchild;}
+            }
+            find_path_i--;
+            if(find_path[find_path_i]==fnd)
+                break;
+            head = find_path[find_path_i] = find_path[find_path_i]->rsibling;
+        }
+    }
+    else
+    {
+        find_path[p] = fnd; p++;
+        head = find_path[p] = fnd->lchild;
+        while(head != fnd){
+            while(head != NULL)
+            {
+                if(head->type==str[0])
+                {
+                    k=1;
+                    printf(".");
+                    for(i=1; i<=p; i++)
+                    {
+                        printf("/%s",find_path[i]->name);
+                    }
+                    printf("\n");
+                    p++;
+                    head = find_path[p] = find_path[p-1]->lchild;
+                }
+                else{
+                p++;
+                head  = find_path[p]  = find_path[p-1]->lchild;}
+            }
+            p--;
+            if(find_path[p]==fnd)
+                break;
+            head = find_path[p] = find_path[p]->rsibling;
+        }
+    }
+    if(k==0)
+    printf(ANSI_COLOR_RED"No such type \'%s\'\n"ANSI_COLOR_RESET,FILE_NAME);
+}
+
+void type_find(char* FILE_NAME)
+{
+    int i,p;
+    int k=0;
+    char str[MAX];
+    nptr head;
+    strcpy(str,FILE_NAME);
+    if(str[0]=='f')
+        str[0]='-';
+    p = 0;
+    find_path[p] = current; p++;
+    head = find_path[p] = current->lchild;
+    while(head != current){
+    while(head != NULL)
+    {
+        if(head->type==str[0])
+        {
+            k=1;
+            printf(".");
+            for(i=1; i<=p; i++)
+            {
+                printf("/%s",find_path[i]->name);
+            }
+            printf("\n");
+            p++;
+            head = find_path[p] = find_path[p-1]->lchild;
+        }
+        else{
+        p++;
+        head  = find_path[p]  = find_path[p-1]->lchild;}
+    }
+    p--;
+    if(find_path[p]==current)
+        break;
+    head = find_path[p] = find_path[p]->rsibling;
+    }
+    if(k==0)
+    printf(ANSI_COLOR_RED"No such type \'%s\'\n"ANSI_COLOR_RESET,FILE_NAME);
+}
+
+
+
+void find_FULL(char* FILE_NAME2, char* FILE_NAME)
+{
+    cd_find(FILE_NAME2);
+    char str[MAX];
+    char str2[MAX];
+    char str1[MAX];
+    char* str_f;
+    char ptr[MAX];
+    char* ptr_f;
+    char del[] = "*";
+    nptr head;
+
+
+    int p = 0;
+    int i = 0;
+    int k = 0;
+    int io = 0;
+    int po = 0;
+    int ko = 0;
+
+    strcpy(str,FILE_NAME);
+    if(str[0]=='"'&&str[strlen(str)-1]=='"')
+    {
+        if(str[1]=='*'&&str[strlen(str)-2]=='*') //-name "*name*" command ##among name
+        {
+            for(i=2; i<strlen(str)-2;i++)
+            {
+                str[i-2] = str[i];
+                str[i]='*';
+            }
+            str_f = strtok(str,del);
+            //printf("%s\n",str_f);
+            //printf("%s\n",current->name);
+            find_path_i++;
+            head = find_path[find_path_i] = fnd->lchild;
+            while(head != fnd){
+            while(head != NULL)
+            {
+                if(strstr(head->name,str_f)!=NULL)
+                {
+                    k=1;
+
+                    for(i=0; i<=find_path_i; i++)
+                    {
+                        printf("/%s",find_path[i]->name);
+                    }
+                    printf("\n");
+                    find_path_i++;
+                    head = find_path[find_path_i] = find_path[find_path_i-1]->lchild;
+                }
+                else{
+                find_path_i++;
+                head  = find_path[find_path_i]  = find_path[find_path_i-1]->lchild;}
+
+            }
+            find_path_i--;
+            if(find_path[find_path_i]==fnd)
+                break;
+            head = find_path[find_path_i] = find_path[find_path_i]->rsibling;
+            }
+            if(k==0)
+            printf(ANSI_COLOR_RED"find:  \'%s\'  : No such file or directory\n"ANSI_COLOR_RESET,str_f);
+        }
+
+        else if(str[1]=='*')  // -name "*name" command  ##end name
+        {
+            strcpy(str1, FILE_NAME);
+            str_f = strtok(str1, " \" *");
+
+            find_path_i++;
+            head = find_path[find_path_i] = fnd->lchild;
+
+            while(head != fnd){
+            while(head != NULL)
+            {
+                io = strlen(head->name);
+                po = strlen(str_f);
+                ko = io-po;
+                if(strncmp(head->name+ko,str_f,po)==0)
+                {
+                    k=1;
+
+                    for(i=0; i<=find_path_i; i++)
+                    {
+                        printf("/%s",find_path[i]->name);
+                    }
+                    printf("\n");
+                    find_path_i++;
+                    head = find_path[find_path_i] = find_path[find_path_i-1]->lchild;
+                }
+                else{
+                find_path_i++;
+                head  = find_path[find_path_i]  = find_path[find_path_i-1]->lchild;}
+
+            }
+            find_path_i--;
+            if(find_path[find_path_i]==fnd)
+                break;
+            head = find_path[find_path_i] = find_path[find_path_i]->rsibling;
+            }
+            if(k==0)
+            printf(ANSI_COLOR_RED"find:  \'%s\'  : No such file or directory\n"ANSI_COLOR_RESET,str_f);
+        }
+        else if(str[strlen(str)-2]=='*')  // -name "name*" command  ##start name
+        {
+            strcpy(str1, FILE_NAME);
+            str_f = strtok(str1, " \" *");
+
+            find_path_i++;
+            head = find_path[find_path_i] = fnd->lchild;
+
+            while(head != fnd){
+            while(head != NULL)
+            {
+                io = strlen(head->name);
+                po = strlen(str_f);
+                ko = io-po;
+                if(strncmp(head->name,str_f,po)==0)
+                {
+                    k=1;
+                    for(i=0; i<=find_path_i; i++)
+                    {
+                        printf("/%s",find_path[i]->name);
+                    }
+                    printf("\n");
+                    find_path_i++;
+                    head = find_path[find_path_i] = find_path[find_path_i-1]->lchild;
+                }
+                else{
+                find_path_i++;
+                head  = find_path[find_path_i]  = find_path[find_path_i-1]->lchild;}
+
+            }
+            find_path_i--;
+            if(find_path[find_path_i]==fnd)
+                break;
+            head = find_path[find_path_i] = find_path[find_path_i]->rsibling;
+            }
+            if(k==0)
+            printf(ANSI_COLOR_RED"find:  \'%s\'  : No such file or directory\n"ANSI_COLOR_RESET,str_f);
+        }
+        else
+            {
+            strcpy(str1, FILE_NAME);
+            str_f = strtok(str1, " \" *");
+
+            find_path_i++;
+            head = find_path[find_path_i] = fnd->lchild;
+
+            while(head != fnd){
+            while(head != NULL)
+            {
+                io = strlen(head->name);
+                po = strlen(str_f);
+                ko = io-po;
+                if(strncmp(head->name,str_f,io)==0)
+                {
+                    k=1;
+                    for(i=0; i<=find_path_i; i++)
+                    {
+                        printf("/%s",find_path[i]->name);
+                    }
+                    printf("\n");
+                    find_path_i++;
+                    head = find_path[find_path_i] = find_path[find_path_i-1]->lchild;
+                }
+                else{
+                find_path_i++;
+                head  = find_path[find_path_i]  = find_path[find_path_i-1]->lchild;}
+
+            }
+            find_path_i--;
+            if(find_path[find_path_i]==fnd)
+                break;
+            head = find_path[find_path_i] = find_path[find_path_i]->rsibling;
+            }
+            if(k==0)
+            printf(ANSI_COLOR_RED"find:  \'%s\'  : No such file or directory\n"ANSI_COLOR_RESET,str_f);
+        }
+    }
+    else
+        printf(ANSI_COLOR_RED"Enter the right option\n"ANSI_COLOR_RESET);
+
+}
+
+
+//file input output
+nptr makeNodedata(char d[MAX]) {
+
+    int i=0;
+    int nodeD_i= 0;
+    char nodeD[11][MAX];
+    char str1[MAX];
+    char* token;
+    strcpy(str1, d);
+    token = strtok(str1, " ");
+    while (token != NULL) {
+        strcpy(nodeD[nodeD_i++], token);
+        token = strtok(NULL, " ");
+    }
+    while (nodeD[nodeD_i - 1][i++] != '\n');
+    nodeD[nodeD_i - 1][--i] = '\0';
+
+    nptr newnode = (nptr)malloc(sizeof(node));
+    newnode->type = nodeD[1][0];
+    strcpy(newnode->owner ,nodeD[5]);
+    strcpy(newnode->group ,nodeD[6]);
+    strcpy(newnode->name, nodeD[0]);
+    for (i = 0; i < 3; i++) {
+        newnode->mode[i] = atoi(nodeD[i+2]);
+    }
+    struct tm* t =(struct tm*)malloc(sizeof(struct tm));
+    newnode->time = t;
+    newnode->time->tm_mon = atoi(nodeD[7]);
+    newnode->time->tm_mday = atoi(nodeD[8]);
+    newnode->time->tm_hour = atoi(nodeD[9]);
+    newnode->time->tm_min = atoi(nodeD[10]);
+
+    newnode->rsibling = NULL; newnode->lchild = NULL;
+
+    return newnode;
+
+}
+
+void writeNodedata(nptr temp) {
+    //printf("%s\n", temp->name);
+    FILE* fp = fopen(Nodedata, "at");
+    if (temp != NULL) {
+
+        fprintf(fp, "%s %c %d %d %d %s %s %d %d %d %d\n",
+            temp->name, temp->type,
+            temp->mode[0],temp->mode[1],temp->mode[2],
+            temp->owner,temp->group,
+            temp->time->tm_mon,temp->time->tm_mday,temp->time->tm_hour,temp->time->tm_min);
+        fclose(fp);
+
+        writeNodedata(temp->lchild);
+        writeNodedata(temp->rsibling);
+    }
+    else {
+        fprintf(fp, "-\n");
+        fclose(fp);
+        return;
+    }
+}
+
+void callNodedata(int op) {
+    FILE* fp = fopen(Nodedata, "rt");
+    current = NULL;
+
+    if (fp == NULL) {
+        writeNodedata(root);
+        return;
+    }
+    if (op > 0) {
+        fclose(fp);
+        fp = fopen(Nodedata, "wt");
+        fprintf(fp, " ");
+        fclose(fp);
+        writeNodedata(root);
+    } // txt 파일에 쓰기
+    else {
+        init_ab_path();
+        int pop = 0, cnt = 0;
+        while (!feof(fp)) {
+            char data[MAX];
+            fgets(data,MAX,fp);
+            if (strcmp(data, "-\n")) {
+                if (cnt > 0) {
+                    ab_path[ab_path_i]->rsibling = makeNodedata(data);
+                    ab_path[ab_path_i] = ab_path[ab_path_i]->rsibling;
+                    ab_path_i++; cnt=0;
+                }
+                else {
+                    ab_path[ab_path_i++] = makeNodedata(data);
+                    if (ab_path_i == 2) {
+                        root = ab_path[0];
+                        user = ab_path[1];
+                        ab_path[0]->lchild = ab_path[1];
+                    }
+                    else if (ab_path_i > 2) {
+                        ab_path[ab_path_i - 2]->lchild = ab_path[ab_path_i - 1];
+                    }
+                }
+            }
+            else {
+                ab_path[ab_path_i--] = NULL;
+                cnt++;
+            }
+        }
+    } // 읽은 정보로 노드 만들기
+    current = current_path[current_path_i];
+}
+
+//chmod
+//change mode
+
+void ch_mod(char mod[MAX],char dname[MAX])
+{
+    nptr whatiwant=search_Sibling(current,dname);
+    if(whatiwant==NULL)
+    {
+        printf(ANSI_COLOR_RED"%s does not exist\n"ANSI_COLOR_RESET, dname);
+    }
+    else
+    {
+        int i=0;
+        for(i=0;i<3;i++)
+        {
+            whatiwant->mode[i]=(int)(mod[i]-'0');
+        }
+
+    }
+}
+
+//chown
+//change owner
+
+void ch_own(char ownergroup[MAX], char name[MAX])
+{
+    nptr whatiwant=search_Sibling(current,name);
+
+    if(whatiwant==NULL)
+    {
+        printf(ANSI_COLOR_RED"%s does not exist\n"ANSI_COLOR_RESET, name);
+    }
+    else
+    {
+        char OwnerNGroup[MAX][MAX];
+        char list_row=0;
+
+        char* token=strtok(ownergroup,":");
+        while(token!=NULL)
+        {
+            strcpy(OwnerNGroup[list_row],token);
+            list_row++;
+            token=strtok(NULL,":");
+
+        }
+
+        if(list_row==1)//chown root
+        {
+            strcpy(whatiwant->owner,OwnerNGroup[0]);
+        }
+        else//chown root:root && list_row==2
+        {
+            strcpy(whatiwant->owner,OwnerNGroup[0]);
+            strcpy(whatiwant->group,OwnerNGroup[1]);
+        }
+
+    }
+}
+
+//histroy
+//histroy
+
+void history()
+{
+    int startstart;
+    for(startstart=0;startstart<Row_of_History;startstart++)
+    {
+        if(startstart==(Row_of_History-1))
+        {
+            printf("%5d   %s\n",(startstart+1),History_of_Command[startstart]);// for random error
+            break;
+        }
+        printf("%5d   %s\n",(startstart+1),History_of_Command[startstart]);
+    }
+}
+
+//!!
+//!!
+
+void exclamationexclamation()
+{
+    char command_list[][10] = { "ls","pwd","cd","mkdir","cat","cp","rm","find", "history"};
+    char option[MAX][MAX];
+
+    char original[MAX];
+    strcpy(original, History_of_Command[Row_of_History-1]);
+
+
+    char* cmd = strtok(History_of_Command[Row_of_History-1], " ");
+    int count_option = 0; // 옵션 개수
+    while (cmd != NULL) {
+        strcpy(option[++count_option], cmd);
+        cmd = strtok(NULL, " ");
+    }
+
+    int i = 0;
+    while ( strcmp(History_of_Command[Row_of_History-1], command_list[i]) != 0)
+    {
+        i++;
+    }
+    if (strcmp(History_of_Command[Row_of_History-1], command_list[i]) == 0)
+    {
+        printf("%s\n", original);
+        send_command(i, count_option, option);
+    }
+    else printf(ANSI_COLOR_RED"Error: Wrong command...\n"ANSI_COLOR_RESET);
+
+}
